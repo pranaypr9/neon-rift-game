@@ -2,14 +2,14 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>Neon Rift – Space Shooter</title>
 <style>
 :root{--bg:#05060f;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#05060f}}
 :root[data-theme="dark"]{--bg:#05060f}
 html,body{height:100%;margin:0;background:var(--bg);overflow:hidden}
-canvas{display:block;width:100%;height:100%;cursor:crosshair}
+canvas{display:block;width:100%;height:100%;cursor:crosshair;touch-action:none;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;-webkit-tap-highlight-color:transparent}
 </style>
 </head>
 <body>
@@ -26,7 +26,31 @@ const FIRE_DELAY=0.16, START_LIVES=3, INVULN=2;
 const R=Math.random, TAU=Math.PI*2;
 
 // ---- input ----
-const keys={};let mouse={x:0,y:0,t:-99},mouseDown=false;
+const keys={};let mouse={x:0,y:0,t:-1e9},mouseDown=false;
+// touch: left half = floating move stick, right half = aim at finger + auto-fire
+const isTouch='ontouchstart' in window||navigator.maxTouchPoints>0;
+let joy=null,aimT=null,overAt=0;const JR=55;
+function tpos(t){const r=cv.getBoundingClientRect();return{x:t.clientX-r.left,y:t.clientY-r.top}}
+function tstart(e){
+  e.preventDefault();
+  if(state!=='play'){if(performance.now()-overAt>700)start();return}
+  for(const t of e.changedTouches){const p=tpos(t);
+    if(p.x<W/2){if(!joy)joy={id:t.identifier,ox:p.x,oy:p.y,x:p.x,y:p.y}}
+    else if(!aimT)aimT={id:t.identifier,x:p.x,y:p.y};}
+}
+function tmove(e){
+  e.preventDefault();
+  for(const t of e.changedTouches){const p=tpos(t);
+    if(joy&&t.identifier===joy.id){joy.x=p.x;joy.y=p.y}
+    if(aimT&&t.identifier===aimT.id){aimT.x=p.x;aimT.y=p.y}}
+}
+function tend(e){
+  e.preventDefault();
+  for(const t of e.changedTouches){
+    if(joy&&t.identifier===joy.id)joy=null;
+    if(aimT&&t.identifier===aimT.id)aimT=null}
+}
+for(const [n,f] of [['touchstart',tstart],['touchmove',tmove],['touchend',tend],['touchcancel',tend]])cv.addEventListener(n,f,{passive:false});
 addEventListener('keydown',e=>{keys[e.code]=true;if(['Space','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.code))e.preventDefault();
   if((e.code==='Enter'||e.code==='Space')&&state!=='play')start();});
 addEventListener('keyup',e=>keys[e.code]=false);
@@ -38,7 +62,7 @@ addEventListener('mouseup',()=>mouseDown=false);
 let state='title',ship,bullets,rocks,foes,parts,score,lives,wave,spawnQueue,waveDelay,fireCd,time,shake,best=0;
 
 function start(){
-  state='play';score=0;lives=START_LIVES;wave=0;time=0;fireCd=0;shake=0;
+  joy=aimT=null;state='play';score=0;lives=START_LIVES;wave=0;time=0;fireCd=0;shake=0;
   bullets=[];rocks=[];foes=[];parts=[];spawnQueue=[];waveDelay=0.5;
   ship={x:W/2,y:H/2,vx:0,vy:0,a:-Math.PI/2,inv:INVULN,r:12};
 }
@@ -89,7 +113,7 @@ function burst(x,y,n,col,spd=160){
 function hitShip(){
   if(ship.inv>0)return;
   lives--;shake=0.4;burst(ship.x,ship.y,40,'#0ff',260);
-  if(lives<=0){state='over';best=Math.max(best,score);return}
+  if(lives<=0){state='over';overAt=performance.now();best=Math.max(best,score);return}
   ship.x=W/2;ship.y=H/2;ship.vx=ship.vy=0;ship.inv=INVULN;
 }
 function killRock(i){
@@ -110,17 +134,19 @@ function update(dt){
   // ship
   let ix=(keys.ArrowRight||keys.KeyD?1:0)-(keys.ArrowLeft||keys.KeyA?1:0);
   let iy=(keys.ArrowDown||keys.KeyS?1:0)-(keys.ArrowUp||keys.KeyW?1:0);
-  const m=Math.hypot(ix,iy)||1;
+  if(joy){let dx=(joy.x-joy.ox)/JR,dy=(joy.y-joy.oy)/JR;const l=Math.hypot(dx,dy);if(l>1){dx/=l;dy/=l}if(l>0.12){ix=dx;iy=dy}}
+  const m=Math.max(1,Math.hypot(ix,iy));
   ship.vx+=ix/m*650*dt;ship.vy+=iy/m*650*dt;
   const f=Math.exp(-2.6*dt);ship.vx*=f;ship.vy*=f;
   const sp=Math.hypot(ship.vx,ship.vy);if(sp>360){ship.vx*=360/sp;ship.vy*=360/sp}
   ship.x+=ship.vx*dt;ship.y+=ship.vy*dt;wrap(ship,12);
-  if(performance.now()-mouse.t<3000)ship.a=Math.atan2(mouse.y-ship.y,mouse.x-ship.x);
+  if(aimT)ship.a=Math.atan2(aimT.y-ship.y,aimT.x-ship.x);
+  else if(performance.now()-mouse.t<3000)ship.a=Math.atan2(mouse.y-ship.y,mouse.x-ship.x);
   else if(sp>30)ship.a=Math.atan2(ship.vy,ship.vx);
   ship.inv=Math.max(0,ship.inv-dt);
   // fire (rate limited)
   fireCd-=dt;
-  if((keys.Space||mouseDown)&&fireCd<=0&&bullets.length<CAP.bullets){
+  if((keys.Space||mouseDown||aimT)&&fireCd<=0&&bullets.length<CAP.bullets){
     fireCd=FIRE_DELAY;
     bullets.push({x:ship.x+Math.cos(ship.a)*16,y:ship.y+Math.sin(ship.a)*16,vx:Math.cos(ship.a)*720+ship.vx*.3,vy:Math.sin(ship.a)*720+ship.vy*.3,life:1.0});
   }
@@ -166,8 +192,8 @@ function draw(){
   ctx.fillStyle='#05060f';ctx.fillRect(0,0,W,H);
   if(state==='title'){
     text('NEON RIFT',W/2,H/2-30,Math.min(64,W/8),'#0ff');
-    text('ARROWS/WASD move · MOUSE aim · SPACE/CLICK fire',W/2,H/2+20,Math.min(16,W/30),'#f0f');
-    text('Press ENTER or SPACE to start',W/2,H/2+60,18,'#ff0');return;
+    text(isTouch?'LEFT THUMB move · RIGHT THUMB aim + fire':'ARROWS/WASD move · MOUSE aim · SPACE/CLICK fire',W/2,H/2+20,Math.min(16,W/26),'#f0f');
+    text(isTouch?'TAP to start':'Press ENTER or SPACE to start',W/2,H/2+60,18,'#ff0');return;
   }
   ctx.save();
   if(shake>0)ctx.translate((R()-.5)*12*shake,(R()-.5)*12*shake);
@@ -190,7 +216,7 @@ function draw(){
   if(state==='play'&&(ship.inv<=0||Math.floor(time*10)%2)){
     glow('#0ff',14);ctx.save();ctx.translate(ship.x,ship.y);ctx.rotate(ship.a);
     ctx.beginPath();ctx.moveTo(16,0);ctx.lineTo(-11,-10);ctx.lineTo(-6,0);ctx.lineTo(-11,10);ctx.closePath();ctx.stroke();
-    if(keys.ArrowUp||keys.ArrowDown||keys.ArrowLeft||keys.ArrowRight||keys.KeyW||keys.KeyA||keys.KeyS||keys.KeyD){
+    if(joy||keys.ArrowUp||keys.ArrowDown||keys.ArrowLeft||keys.ArrowRight||keys.KeyW||keys.KeyA||keys.KeyS||keys.KeyD){
       glow('#f80',10);ctx.beginPath();ctx.moveTo(-8,-4);ctx.lineTo(-16-R()*6,0);ctx.lineTo(-8,4);ctx.stroke()}
     ctx.restore();
   }
@@ -201,12 +227,22 @@ function draw(){
   ctx.shadowBlur=10;ctx.shadowColor='#0ff';ctx.strokeStyle='#0ff';ctx.lineWidth=2;
   for(let i=0;i<lives;i++){ctx.save();ctx.translate(W-28-i*26,24);ctx.rotate(-Math.PI/2);ctx.beginPath();ctx.moveTo(9,0);ctx.lineTo(-7,-6);ctx.lineTo(-3,0);ctx.lineTo(-7,6);ctx.closePath();ctx.stroke();ctx.restore()}
   if(banner>0&&state==='play')text('WAVE '+wave,W/2,H/2-80,40,'#ff0');
+  if(state==='play'&&isTouch){
+    ctx.lineWidth=2;ctx.shadowBlur=8;
+    if(joy){
+      ctx.strokeStyle=ctx.shadowColor='#0ff';ctx.beginPath();ctx.arc(joy.ox,joy.oy,JR,0,TAU);ctx.stroke();
+      let dx=joy.x-joy.ox,dy=joy.y-joy.oy;const l=Math.hypot(dx,dy);if(l>JR){dx*=JR/l;dy*=JR/l}
+      ctx.beginPath();ctx.arc(joy.ox+dx,joy.oy+dy,22,0,TAU);ctx.stroke();
+    }
+    if(aimT){ctx.strokeStyle=ctx.shadowColor='#f0f';ctx.beginPath();ctx.arc(aimT.x,aimT.y,26,0,TAU);ctx.stroke()}
+    if(time<6&&!joy&&!aimT){text('MOVE',W*.25,H-50,16,'#0ff');text('AIM + FIRE',W*.75,H-50,16,'#f0f')}
+  }
   if(state==='over'){
     ctx.fillStyle='rgba(5,6,15,.7)';ctx.fillRect(0,0,W,H);
     text('GAME OVER',W/2,H/2-40,Math.min(60,W/9),'#f0f');
     text('Final score: '+score,W/2,H/2+5,26,'#0ff');
     text('Best: '+best+' · Reached wave '+wave,W/2,H/2+38,16,'#7fff00');
-    text('Press ENTER, SPACE or click to restart',W/2,H/2+80,18,'#ff0');
+    text(isTouch?'TAP to restart':'Press ENTER, SPACE or click to restart',W/2,H/2+80,18,'#ff0');
   }
 }
 
