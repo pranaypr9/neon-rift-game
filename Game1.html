@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Neon Rift – Space Shooter</title>
+<style>
+:root{--bg:#05060f;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#05060f}}
+:root[data-theme="dark"]{--bg:#05060f}
+html,body{height:100%;margin:0;background:var(--bg);overflow:hidden}
+canvas{display:block;width:100%;height:100%;cursor:crosshair}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const cv=document.getElementById('c'),ctx=cv.getContext('2d');
+let W,H;
+function resize(){const d=Math.min(devicePixelRatio||1,2);W=cv.clientWidth;H=cv.clientHeight;cv.width=W*d;cv.height=H*d;ctx.setTransform(d,0,0,d,0,0)}
+addEventListener('resize',resize);resize();
+
+// ---- tuning ----
+const CAP={bullets:60,rocks:40,ships:14,parts:220};
+const FIRE_DELAY=0.16, START_LIVES=3, INVULN=2;
+const R=Math.random, TAU=Math.PI*2;
+
+// ---- input ----
+const keys={};let mouse={x:0,y:0,t:-99},mouseDown=false;
+addEventListener('keydown',e=>{keys[e.code]=true;if(['Space','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.code))e.preventDefault();
+  if((e.code==='Enter'||e.code==='Space')&&state!=='play')start();});
+addEventListener('keyup',e=>keys[e.code]=false);
+cv.addEventListener('mousemove',e=>{mouse.x=e.offsetX;mouse.y=e.offsetY;mouse.t=performance.now()});
+cv.addEventListener('mousedown',()=>{mouseDown=true;if(state!=='play')start()});
+addEventListener('mouseup',()=>mouseDown=false);
+
+// ---- state ----
+let state='title',ship,bullets,rocks,foes,parts,score,lives,wave,spawnQueue,waveDelay,fireCd,time,shake,best=0;
+
+function start(){
+  state='play';score=0;lives=START_LIVES;wave=0;time=0;fireCd=0;shake=0;
+  bullets=[];rocks=[];foes=[];parts=[];spawnQueue=[];waveDelay=0.5;
+  ship={x:W/2,y:H/2,vx:0,vy:0,a:-Math.PI/2,inv:INVULN,r:12};
+}
+
+// ---- spawning ----
+function edgePoint(){
+  for(let i=0;i<10;i++){
+    const s=Math.floor(R()*4),p={x:s<2?R()*W:(s===2?-30:W+30),y:s<2?(s?H+30:-30):R()*H};
+    if(Math.hypot(p.x-ship.x,p.y-ship.y)>220)return p;
+  }
+  return {x:-30,y:-30};
+}
+function makeRock(x,y,size,vx,vy){
+  const r=[9,18,32][size-1],n=9+Math.floor(R()*4),off=[];
+  for(let i=0;i<n;i++)off.push(0.75+R()*0.5);
+  const sp=(40+R()*50+wave*6)*(4-size)*0.55;
+  if(vx===undefined){const a=R()*TAU;vx=Math.cos(a)*sp;vy=Math.sin(a)*sp}
+  return {x,y,vx,vy,size,r,off,rot:R()*TAU,vr:(R()-.5)*1.5};
+}
+function nextWave(){
+  wave++;
+  // difficulty ramp: each wave adds asteroids and hunter ships, and they get faster
+  const rockN=3+wave,shipN=wave<2?0:Math.floor(wave*1.1);
+  spawnQueue=[];
+  for(let i=0;i<rockN;i++)spawnQueue.push('rock');
+  for(let i=0;i<shipN;i++)spawnQueue.push('ship');
+  spawnQueue.sort(()=>R()-.5);
+  spawnTimer=0;banner=2;
+}
+let spawnTimer=0,banner=0;
+function trickle(dt){
+  // drip spawns from the queue; respects caps so the screen never floods
+  spawnTimer-=dt;
+  if(!spawnQueue.length||spawnTimer>0)return;
+  const t=spawnQueue[spawnQueue.length-1];
+  if(t==='rock'&&rocks.length<CAP.rocks){const p=edgePoint();rocks.push(makeRock(p.x,p.y,3));spawnQueue.pop()}
+  else if(t==='ship'&&foes.length<CAP.ships){const p=edgePoint();foes.push({x:p.x,y:p.y,a:0,r:12,sp:85+wave*9});spawnQueue.pop()}
+  spawnTimer=Math.max(0.25,1.0-wave*0.06);
+}
+
+// ---- fx ----
+function burst(x,y,n,col,spd=160){
+  for(let i=0;i<n&&parts.length<CAP.parts;i++){
+    const a=R()*TAU,s=R()*spd;
+    parts.push({x,y,vx:Math.cos(a)*s,vy:Math.sin(a)*s,life:0.4+R()*0.5,max:0.9,col});
+  }
+}
+function hitShip(){
+  if(ship.inv>0)return;
+  lives--;shake=0.4;burst(ship.x,ship.y,40,'#0ff',260);
+  if(lives<=0){state='over';best=Math.max(best,score);return}
+  ship.x=W/2;ship.y=H/2;ship.vx=ship.vy=0;ship.inv=INVULN;
+}
+function killRock(i){
+  const a=rocks[i];rocks.splice(i,1);
+  score+=[0,100,50,20][a.size];burst(a.x,a.y,10+a.size*4,'#f0f',120);
+  if(a.size>1&&rocks.length<CAP.rocks-1){
+    for(let k=0;k<2;k++){
+      const ang=R()*TAU,sp=70+R()*70+wave*5;
+      rocks.push(makeRock(a.x,a.y,a.size-1,a.vx*.5+Math.cos(ang)*sp,a.vy*.5+Math.sin(ang)*sp));
+    }
+  }
+}
+
+// ---- update ----
+function wrap(o,m){if(o.x<-m)o.x=W+m;else if(o.x>W+m)o.x=-m;if(o.y<-m)o.y=H+m;else if(o.y>H+m)o.y=-m}
+function update(dt){
+  time+=dt;shake=Math.max(0,shake-dt);banner=Math.max(0,banner-dt);
+  // ship
+  let ix=(keys.ArrowRight||keys.KeyD?1:0)-(keys.ArrowLeft||keys.KeyA?1:0);
+  let iy=(keys.ArrowDown||keys.KeyS?1:0)-(keys.ArrowUp||keys.KeyW?1:0);
+  const m=Math.hypot(ix,iy)||1;
+  ship.vx+=ix/m*650*dt;ship.vy+=iy/m*650*dt;
+  const f=Math.exp(-2.6*dt);ship.vx*=f;ship.vy*=f;
+  const sp=Math.hypot(ship.vx,ship.vy);if(sp>360){ship.vx*=360/sp;ship.vy*=360/sp}
+  ship.x+=ship.vx*dt;ship.y+=ship.vy*dt;wrap(ship,12);
+  if(performance.now()-mouse.t<3000)ship.a=Math.atan2(mouse.y-ship.y,mouse.x-ship.x);
+  else if(sp>30)ship.a=Math.atan2(ship.vy,ship.vx);
+  ship.inv=Math.max(0,ship.inv-dt);
+  // fire (rate limited)
+  fireCd-=dt;
+  if((keys.Space||mouseDown)&&fireCd<=0&&bullets.length<CAP.bullets){
+    fireCd=FIRE_DELAY;
+    bullets.push({x:ship.x+Math.cos(ship.a)*16,y:ship.y+Math.sin(ship.a)*16,vx:Math.cos(ship.a)*720+ship.vx*.3,vy:Math.sin(ship.a)*720+ship.vy*.3,life:1.0});
+  }
+  for(let i=bullets.length-1;i>=0;i--){const b=bullets[i];b.x+=b.vx*dt;b.y+=b.vy*dt;b.life-=dt;
+    if(b.life<=0||b.x<-10||b.x>W+10||b.y<-10||b.y>H+10)bullets.splice(i,1)}
+  // rocks
+  for(const a of rocks){a.x+=a.vx*dt;a.y+=a.vy*dt;a.rot+=a.vr*dt;wrap(a,a.r)}
+  // hunter ships: steer toward player
+  for(const e of foes){
+    const want=Math.atan2(ship.y-e.y,ship.x-e.x);
+    let d=want-e.a;d=Math.atan2(Math.sin(d),Math.cos(d));
+    e.a+=Math.max(-2*dt,Math.min(2*dt,d));
+    e.x+=Math.cos(e.a)*e.sp*dt;e.y+=Math.sin(e.a)*e.sp*dt;
+  }
+  // bullet collisions
+  for(let bi=bullets.length-1;bi>=0;bi--){
+    const b=bullets[bi];let hit=false;
+    for(let i=rocks.length-1;i>=0;i--){
+      if(Math.hypot(b.x-rocks[i].x,b.y-rocks[i].y)<rocks[i].r){killRock(i);hit=true;break}
+    }
+    if(!hit)for(let i=foes.length-1;i>=0;i--){
+      if(Math.hypot(b.x-foes[i].x,b.y-foes[i].y)<foes[i].r+3){
+        score+=150;burst(foes[i].x,foes[i].y,22,'#ff0',200);foes.splice(i,1);hit=true;break}
+    }
+    if(hit)bullets.splice(bi,1);
+  }
+  // player collisions
+  if(ship.inv<=0){
+    for(let i=rocks.length-1;i>=0;i--)if(Math.hypot(ship.x-rocks[i].x,ship.y-rocks[i].y)<rocks[i].r+ship.r*.7){killRock(i);hitShip();break}
+    if(state==='play')for(let i=foes.length-1;i>=0;i--)if(Math.hypot(ship.x-foes[i].x,ship.y-foes[i].y)<foes[i].r+ship.r*.7){burst(foes[i].x,foes[i].y,20,'#ff0');foes.splice(i,1);hitShip();break}
+  }
+  for(let i=parts.length-1;i>=0;i--){const p=parts[i];p.x+=p.vx*dt;p.y+=p.vy*dt;p.life-=dt;if(p.life<=0)parts.splice(i,1)}
+  // waves
+  trickle(dt);
+  if(!spawnQueue.length&&!rocks.length&&!foes.length){waveDelay-=dt;if(waveDelay<=0){nextWave();waveDelay=1.8}}
+}
+
+// ---- render ----
+function glow(c,b=12){ctx.strokeStyle=c;ctx.shadowColor=c;ctx.shadowBlur=b;ctx.lineWidth=2}
+function text(s,x,y,size,c,al='center'){ctx.shadowBlur=14;ctx.shadowColor=c;ctx.fillStyle=c;ctx.font=`bold ${size}px "Courier New",monospace`;ctx.textAlign=al;ctx.fillText(s,x,y)}
+function draw(){
+  ctx.setTransform(Math.min(devicePixelRatio||1,2),0,0,Math.min(devicePixelRatio||1,2),0,0);
+  ctx.fillStyle='#05060f';ctx.fillRect(0,0,W,H);
+  if(state==='title'){
+    text('NEON RIFT',W/2,H/2-30,Math.min(64,W/8),'#0ff');
+    text('ARROWS/WASD move · MOUSE aim · SPACE/CLICK fire',W/2,H/2+20,Math.min(16,W/30),'#f0f');
+    text('Press ENTER or SPACE to start',W/2,H/2+60,18,'#ff0');return;
+  }
+  ctx.save();
+  if(shake>0)ctx.translate((R()-.5)*12*shake,(R()-.5)*12*shake);
+  for(const p of parts){ctx.globalAlpha=Math.max(0,p.life/p.max);ctx.fillStyle=p.col;ctx.fillRect(p.x-1.5,p.y-1.5,3,3)}
+  ctx.globalAlpha=1;
+  glow('#f0f',10);
+  for(const a of rocks){
+    ctx.beginPath();const n=a.off.length;
+    for(let i=0;i<n;i++){const t=a.rot+i/n*TAU,r=a.r*a.off[i];const x=a.x+Math.cos(t)*r,y=a.y+Math.sin(t)*r;i?ctx.lineTo(x,y):ctx.moveTo(x,y)}
+    ctx.closePath();ctx.stroke();
+  }
+  glow('#ff0',12);
+  for(const e of foes){
+    ctx.save();ctx.translate(e.x,e.y);ctx.rotate(e.a);
+    ctx.beginPath();ctx.moveTo(14,0);ctx.lineTo(-10,-11);ctx.lineTo(-4,0);ctx.lineTo(-10,11);ctx.closePath();ctx.stroke();ctx.restore();
+  }
+  glow('#7fff00',10);ctx.beginPath();
+  for(const b of bullets){ctx.moveTo(b.x,b.y);ctx.lineTo(b.x-b.vx*0.02,b.y-b.vy*0.02)}
+  ctx.lineWidth=3;ctx.stroke();
+  if(state==='play'&&(ship.inv<=0||Math.floor(time*10)%2)){
+    glow('#0ff',14);ctx.save();ctx.translate(ship.x,ship.y);ctx.rotate(ship.a);
+    ctx.beginPath();ctx.moveTo(16,0);ctx.lineTo(-11,-10);ctx.lineTo(-6,0);ctx.lineTo(-11,10);ctx.closePath();ctx.stroke();
+    if(keys.ArrowUp||keys.ArrowDown||keys.ArrowLeft||keys.ArrowRight||keys.KeyW||keys.KeyA||keys.KeyS||keys.KeyD){
+      glow('#f80',10);ctx.beginPath();ctx.moveTo(-8,-4);ctx.lineTo(-16-R()*6,0);ctx.lineTo(-8,4);ctx.stroke()}
+    ctx.restore();
+  }
+  ctx.restore();
+  // HUD
+  text('SCORE '+String(score).padStart(6,'0'),16,30,20,'#0ff','left');
+  text('WAVE '+wave,W/2,30,20,'#ff0');
+  ctx.shadowBlur=10;ctx.shadowColor='#0ff';ctx.strokeStyle='#0ff';ctx.lineWidth=2;
+  for(let i=0;i<lives;i++){ctx.save();ctx.translate(W-28-i*26,24);ctx.rotate(-Math.PI/2);ctx.beginPath();ctx.moveTo(9,0);ctx.lineTo(-7,-6);ctx.lineTo(-3,0);ctx.lineTo(-7,6);ctx.closePath();ctx.stroke();ctx.restore()}
+  if(banner>0&&state==='play')text('WAVE '+wave,W/2,H/2-80,40,'#ff0');
+  if(state==='over'){
+    ctx.fillStyle='rgba(5,6,15,.7)';ctx.fillRect(0,0,W,H);
+    text('GAME OVER',W/2,H/2-40,Math.min(60,W/9),'#f0f');
+    text('Final score: '+score,W/2,H/2+5,26,'#0ff');
+    text('Best: '+best+' · Reached wave '+wave,W/2,H/2+38,16,'#7fff00');
+    text('Press ENTER, SPACE or click to restart',W/2,H/2+80,18,'#ff0');
+  }
+}
+
+// ---- loop (delta-time, clamped so tab switches don't teleport things) ----
+let last=performance.now();
+function frame(t){
+  const dt=Math.min(0.05,(t-last)/1000);last=t;
+  if(state!=='title'&&(state==='play'||state==='over')){
+    if(state==='play')update(dt);
+    else{for(const p of parts){p.x+=p.vx*dt;p.y+=p.vy*dt;p.life-=dt}parts=parts.filter(p=>p.life>0);for(const a of rocks){a.x+=a.vx*dt;a.y+=a.vy*dt;a.rot+=a.vr*dt;wrap(a,a.r)}}
+  }
+  draw();requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
